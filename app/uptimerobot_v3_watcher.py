@@ -247,8 +247,8 @@ def run_loop() -> None:
                 maybe_send(
                     cfg,
                     state,
-                    "🚨 API DOWN",
-                    f"Monitor {cfg.monitor_id}\nstatus={status_text or status_code}\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
+                    "*🚨 sistema do wesley caiu, droga!!!*",
+                    f"monitor/client id: {cfg.monitor_id} - wesley motos\nstatus: {status_text or status_code}\nhora: {now_utc().strftime('%d/%m %H:%M UTC')}",
                 )
 
             if (not is_down) and prev_down:
@@ -256,8 +256,8 @@ def run_loop() -> None:
                 maybe_send(
                     cfg,
                     state,
-                    "✅ API RECUPEROU",
-                    f"Monitor {cfg.monitor_id}\nstatus={status_text or status_code}\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
+                    "✅ sistema do wesley voltou caralhoouuuu!!!",
+                    f"monitor/client id: {cfg.monitor_id}\nstatus: {status_text or status_code}\nhora: {now_utc().strftime('%d/%m %H:%M UTC')}",
                     bypass_rate_limit=cfg.recover_bypass_rate_limit,
                 )
 
@@ -269,8 +269,8 @@ def run_loop() -> None:
                 maybe_send(
                     cfg,
                     state,
-                    "⚠️ API LENTA",
-                    f"Monitor {cfg.monitor_id}\nresp~{resp_ms}ms (limite {cfg.slow_ms_threshold}ms)\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
+                    "⚠️ sistema do wesley lento pra caralhouuu, conserta!!!",
+                    f"monitor/client id: {cfg.monitor_id}\nresp~{resp_ms}ms: (limite {cfg.slow_ms_threshold}ms)\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
                 )
                 slow_streak = 0  # evita spam
 
@@ -295,15 +295,15 @@ def run_loop() -> None:
                         maybe_send(
                             cfg,
                             state,
-                            "📉 UPTIME 24H BAIXO",
-                            f"Monitor {cfg.monitor_id}\nUptime 24h: {u24:.3f}% (mín {cfg.uptime_24h_min}%)",
+                            "📉 uptime 24h low",
+                            f"monitor/client id: {cfg.monitor_id}\nuptime 24h: {u24:.3f}% (mín {cfg.uptime_24h_min}%)",
                         )
                     if u7 is not None and u7 < cfg.uptime_7d_min:
                         maybe_send(
                             cfg,
                             state,
-                            "📉 UPTIME 7D BAIXO",
-                            f"Monitor {cfg.monitor_id}\nUptime 7d: {u7:.3f}% (mín {cfg.uptime_7d_min}%)",
+                            "📉 uptime 7d low",
+                            f"monitor/client id: {cfg.monitor_id}\nuptime 7d: {u7:.3f}% (mín {cfg.uptime_7d_min}%)",
                         )
 
                 state["last_uptime_check_at"] = now_utc().isoformat()
