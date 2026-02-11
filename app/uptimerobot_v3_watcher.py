@@ -1,8 +1,9 @@
+# app/uptimerobot_v3_watcher.py
 from __future__ import annotations
 
+import json
 import os
 import time
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Optional
 
 import requests
 
-from app.integrations.blibsend import send_whatsapp_text, BlibsendError
+from app.integrations.blibsend_http import BlibsendError, send_whatsapp_text
 
 
 STATE_DIR = Path(".watcher_state")
@@ -33,6 +34,17 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def monitor_obj(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normaliza o objeto do monitor (nunca retorna None).
+    A API v3 pode retornar o monitor dentro de payload["monitor"] ou no root.
+    """
+    mon_any = payload.get("monitor")
+    if isinstance(mon_any, dict):
+        return mon_any
+    return payload
 
 
 @dataclass
@@ -91,7 +103,11 @@ def v3_get_monitor(cfg: Config) -> dict[str, Any]:
         timeout=20,
     )
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    if not isinstance(data, dict):
+        # garante tipo esperado
+        return {}
+    return data
 
 
 def _try_float(x: Any) -> Optional[float]:
@@ -117,11 +133,9 @@ def extract_status(payload: dict[str, Any]) -> tuple[Optional[str], Optional[int
     Retorna (status_text, status_code) se existir.
     A v3 pode trazer campos diferentes dependendo do endpoint.
     """
-    # Tentativas comuns:
-    # payload["monitor"]["status"] ou payload["status"]
-    mon = payload.get("monitor") if isinstance(payload.get("monitor"), dict) else payload
+    mon = monitor_obj(payload)
     status = mon.get("status")
-    # status pode ser string ("up") ou número
+
     if isinstance(status, str):
         return status.lower(), None
     if isinstance(status, (int, float)):
@@ -134,18 +148,18 @@ def extract_response_time_ms(payload: dict[str, Any]) -> Optional[int]:
     Tenta achar response time recente/médio.
     Ajuste se a v3 retornar outro campo.
     """
-    mon = payload.get("monitor") if isinstance(payload.get("monitor"), dict) else payload
+    mon = monitor_obj(payload)
 
-    # Possíveis nomes:
+    # campos diretos comuns
     for key in ("response_time", "responseTime", "avg_response_time", "avgResponseTime", "last_response_time"):
-        v = mon.get(key)
-        ms = _try_int(v)
+        ms = _try_int(mon.get(key))
         if ms is not None:
             return ms
 
-    # Às vezes vem dentro de "stats" ou "metrics"
-    stats = mon.get("stats") or mon.get("metrics") or {}
-    if isinstance(stats, dict):
+    # às vezes vem dentro de stats/metrics
+    stats_any = mon.get("stats") or mon.get("metrics")
+    if isinstance(stats_any, dict):
+        stats: dict[str, Any] = stats_any
         for key in ("response_time", "avg_response_time", "avgResponseTime"):
             ms = _try_int(stats.get(key))
             if ms is not None:
@@ -159,31 +173,29 @@ def extract_uptime_ratios(payload: dict[str, Any]) -> tuple[Optional[float], Opt
     Retorna (uptime_24h, uptime_7d) em %.
     A API pode devolver isso como "99.98" (string/num).
     """
-    mon = payload.get("monitor") if isinstance(payload.get("monitor"), dict) else payload
+    mon = monitor_obj(payload)
 
-    # Tentativas de campos diretos
+    # diretos
     uptime_24h = _try_float(mon.get("uptime_24h") or mon.get("uptime24h") or mon.get("uptime_1d"))
     uptime_7d = _try_float(mon.get("uptime_7d") or mon.get("uptime7d") or mon.get("uptime_7days"))
 
     if uptime_24h is not None or uptime_7d is not None:
         return uptime_24h, uptime_7d
 
-    # Tentativas por arrays/objetos de ratio
-    ratios = mon.get("uptime") or mon.get("ratios") or mon.get("uptime_ratios")
-    # Pode ser dict: {"24h": 99.9, "7d": 99.7}
-    if isinstance(ratios, dict):
+    # por dict
+    ratios_any = mon.get("uptime") or mon.get("ratios") or mon.get("uptime_ratios")
+    if isinstance(ratios_any, dict):
+        ratios: dict[str, Any] = ratios_any
         uptime_24h = _try_float(ratios.get("24h") or ratios.get("1d"))
         uptime_7d = _try_float(ratios.get("7d") or ratios.get("7days"))
         return uptime_24h, uptime_7d
 
-    # Pode ser list (às vezes uptime ratio em lista por períodos)
-    # Se vier assim, você me cola um exemplo do JSON e eu mapeio certinho.
     return None, None
 
 
 def maybe_send(cfg: Config, state: dict[str, Any], title: str, msg: str) -> None:
     last = state.get("last_alert_sent_at")
-    if last:
+    if isinstance(last, str) and last:
         try:
             last_dt = datetime.fromisoformat(last)
             if (now_utc() - last_dt).total_seconds() < cfg.alert_min_interval_s:
@@ -203,9 +215,8 @@ def run_loop() -> None:
     cfg = get_cfg()
     state = load_state()
 
-    # contadores para “lentidão consecutiva”
     slow_streak = int(state.get("slow_streak", 0) or 0)
-    last_uptime_check = state.get("last_uptime_check_at")  # iso
+    last_uptime_check = state.get("last_uptime_check_at")
     print(
         f"[watcher] started. interval={cfg.watch_interval_s}s monitor={cfg.monitor_id} "
         f"slow>={cfg.slow_ms_threshold}ms consecutive={cfg.slow_consecutive} "
@@ -221,8 +232,7 @@ def run_loop() -> None:
             status_text, status_code = extract_status(payload)
             resp_ms = extract_response_time_ms(payload)
 
-            # DOWN detection: aceitando string ou int
-            # Ajuste conforme a v3 retornar no seu payload
+            # DOWN detection (ajuste conforme seu payload)
             is_down = False
             if status_text:
                 is_down = status_text in ("down", "seems_down", "paused", "unknown")
@@ -232,7 +242,6 @@ def run_loop() -> None:
 
             prev_down = bool(state.get("is_down", False))
 
-            # DOWN alert
             if is_down and not prev_down:
                 maybe_send(
                     cfg,
@@ -241,7 +250,6 @@ def run_loop() -> None:
                     f"Monitor {cfg.monitor_id}\nstatus={status_text or status_code}\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
                 )
 
-            # RECOVER alert
             if (not is_down) and prev_down:
                 maybe_send(
                     cfg,
@@ -250,12 +258,9 @@ def run_loop() -> None:
                     f"Monitor {cfg.monitor_id}\nstatus={status_text or status_code}\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
                 )
 
-            # SLOW logic
+            # lentidão consecutiva
             is_slow = resp_ms is not None and resp_ms >= cfg.slow_ms_threshold
-            if is_slow:
-                slow_streak += 1
-            else:
-                slow_streak = 0
+            slow_streak = slow_streak + 1 if is_slow else 0
 
             if cfg.slow_ms_threshold > 0 and slow_streak >= cfg.slow_consecutive:
                 maybe_send(
@@ -264,12 +269,11 @@ def run_loop() -> None:
                     "⚠️ API LENTA",
                     f"Monitor {cfg.monitor_id}\nresp~{resp_ms}ms (limite {cfg.slow_ms_threshold}ms)\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
                 )
-                # reseta pra não spammar todo ciclo
-                slow_streak = 0
+                slow_streak = 0  # evita spam
 
-            # UPTIME ratios (24h/7d) com frequência menor
+            # Uptime 24h/7d em frequência menor
             do_uptime = True
-            if last_uptime_check:
+            if isinstance(last_uptime_check, str) and last_uptime_check:
                 try:
                     last_dt = datetime.fromisoformat(last_uptime_check)
                     do_uptime = (now_utc() - last_dt).total_seconds() >= cfg.uptime_check_every_minutes * 60
@@ -279,9 +283,8 @@ def run_loop() -> None:
             if do_uptime:
                 u24, u7 = extract_uptime_ratios(payload)
 
-                # se não conseguiu extrair, loga um resumo pra você me mandar e eu ajusto em 1 linha
                 if u24 is None and u7 is None:
-                    mon = payload.get("monitor") if isinstance(payload.get("monitor"), dict) else payload
+                    mon = monitor_obj(payload)
                     keys = list(mon.keys())[:50]
                     print(f"[watcher] uptime ratios not found. keys(sample)={keys}")
                 else:
@@ -312,10 +315,7 @@ def run_loop() -> None:
             state["last_check_at"] = now_utc().isoformat()
             save_state(state)
 
-            print(
-                f"[watcher] ok status={state['status']} down={is_down} resp_ms={resp_ms} "
-                f"slow_streak={slow_streak}"
-            )
+            print(f"[watcher] ok status={state['status']} down={is_down} resp_ms={resp_ms} slow_streak={slow_streak}")
 
         except Exception as e:
             print(f"[watcher] ERROR polling uptimerobot v3: {e}")
