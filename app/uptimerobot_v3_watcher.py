@@ -63,7 +63,8 @@ class Config:
     uptime_check_every_minutes: int = 60
 
     alert_to: str = ""
-    alert_min_interval_s: int = 900
+    alert_min_interval_s: int = 900  # rate limit geral
+    recover_bypass_rate_limit: bool = True  # ✅ sempre avisar RECUPEROU
 
 
 def get_cfg() -> Config:
@@ -88,6 +89,7 @@ def get_cfg() -> Config:
         uptime_7d_min=float(os.getenv("UPTIME_7D_MIN", "99.0")),
         uptime_check_every_minutes=int(os.getenv("UPTIME_CHECK_EVERY_MINUTES", "60")),
         alert_min_interval_s=int(os.getenv("ALERT_MIN_INTERVAL_SECONDS", "900")),
+        recover_bypass_rate_limit=os.getenv("RECOVER_BYPASS_RATE_LIMIT", "1").strip() in ("1", "true", "True"),
         alert_to=alert_to,
     )
 
@@ -104,10 +106,7 @@ def v3_get_monitor(cfg: Config) -> dict[str, Any]:
     )
     r.raise_for_status()
     data = r.json()
-    if not isinstance(data, dict):
-        # garante tipo esperado
-        return {}
-    return data
+    return data if isinstance(data, dict) else {}
 
 
 def _try_float(x: Any) -> Optional[float]:
@@ -131,7 +130,6 @@ def _try_int(x: Any) -> Optional[int]:
 def extract_status(payload: dict[str, Any]) -> tuple[Optional[str], Optional[int]]:
     """
     Retorna (status_text, status_code) se existir.
-    A v3 pode trazer campos diferentes dependendo do endpoint.
     """
     mon = monitor_obj(payload)
     status = mon.get("status")
@@ -144,19 +142,13 @@ def extract_status(payload: dict[str, Any]) -> tuple[Optional[str], Optional[int
 
 
 def extract_response_time_ms(payload: dict[str, Any]) -> Optional[int]:
-    """
-    Tenta achar response time recente/médio.
-    Ajuste se a v3 retornar outro campo.
-    """
     mon = monitor_obj(payload)
 
-    # campos diretos comuns
     for key in ("response_time", "responseTime", "avg_response_time", "avgResponseTime", "last_response_time"):
         ms = _try_int(mon.get(key))
         if ms is not None:
             return ms
 
-    # às vezes vem dentro de stats/metrics
     stats_any = mon.get("stats") or mon.get("metrics")
     if isinstance(stats_any, dict):
         stats: dict[str, Any] = stats_any
@@ -169,20 +161,14 @@ def extract_response_time_ms(payload: dict[str, Any]) -> Optional[int]:
 
 
 def extract_uptime_ratios(payload: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
-    """
-    Retorna (uptime_24h, uptime_7d) em %.
-    A API pode devolver isso como "99.98" (string/num).
-    """
     mon = monitor_obj(payload)
 
-    # diretos
     uptime_24h = _try_float(mon.get("uptime_24h") or mon.get("uptime24h") or mon.get("uptime_1d"))
     uptime_7d = _try_float(mon.get("uptime_7d") or mon.get("uptime7d") or mon.get("uptime_7days"))
 
     if uptime_24h is not None or uptime_7d is not None:
         return uptime_24h, uptime_7d
 
-    # por dict
     ratios_any = mon.get("uptime") or mon.get("ratios") or mon.get("uptime_ratios")
     if isinstance(ratios_any, dict):
         ratios: dict[str, Any] = ratios_any
@@ -193,15 +179,28 @@ def extract_uptime_ratios(payload: dict[str, Any]) -> tuple[Optional[float], Opt
     return None, None
 
 
-def maybe_send(cfg: Config, state: dict[str, Any], title: str, msg: str) -> None:
-    last = state.get("last_alert_sent_at")
-    if isinstance(last, str) and last:
-        try:
-            last_dt = datetime.fromisoformat(last)
-            if (now_utc() - last_dt).total_seconds() < cfg.alert_min_interval_s:
-                return
-        except Exception:
-            pass
+def maybe_send(
+    cfg: Config,
+    state: dict[str, Any],
+    title: str,
+    msg: str,
+    *,
+    bypass_rate_limit: bool = False,
+) -> None:
+    """
+    ✅ Correção principal:
+    - permite bypass do rate-limit (usado no RECUPEROU)
+    - evita travar recuperação se DOWN e UP acontecerem dentro de 15 min
+    """
+    if not bypass_rate_limit:
+        last = state.get("last_alert_sent_at")
+        if isinstance(last, str) and last:
+            try:
+                last_dt = datetime.fromisoformat(last)
+                if (now_utc() - last_dt).total_seconds() < cfg.alert_min_interval_s:
+                    return
+            except Exception:
+                pass
 
     try:
         send_whatsapp_text(to=cfg.alert_to, body=f"*{title}*\n{msg}")
@@ -217,10 +216,12 @@ def run_loop() -> None:
 
     slow_streak = int(state.get("slow_streak", 0) or 0)
     last_uptime_check = state.get("last_uptime_check_at")
+
     print(
         f"[watcher] started. interval={cfg.watch_interval_s}s monitor={cfg.monitor_id} "
         f"slow>={cfg.slow_ms_threshold}ms consecutive={cfg.slow_consecutive} "
-        f"uptime24h_min={cfg.uptime_24h_min}% uptime7d_min={cfg.uptime_7d_min}%"
+        f"uptime24h_min={cfg.uptime_24h_min}% uptime7d_min={cfg.uptime_7d_min}% "
+        f"alert_min_interval={cfg.alert_min_interval_s}s recover_bypass={cfg.recover_bypass_rate_limit}"
     )
 
     while True:
@@ -251,11 +252,13 @@ def run_loop() -> None:
                 )
 
             if (not is_down) and prev_down:
+                # ✅ sempre avisar recuperação (por padrão)
                 maybe_send(
                     cfg,
                     state,
                     "✅ API RECUPEROU",
                     f"Monitor {cfg.monitor_id}\nstatus={status_text or status_code}\nHora={now_utc().strftime('%d/%m %H:%M UTC')}",
+                    bypass_rate_limit=cfg.recover_bypass_rate_limit,
                 )
 
             # lentidão consecutiva
