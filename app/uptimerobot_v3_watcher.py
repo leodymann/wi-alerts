@@ -11,7 +11,8 @@ from typing import Any, Optional
 
 import requests
 
-from app.integrations.blibsend_http import BlibsendError, send_whatsapp_text
+# ✅ UAZAPI (novo)
+from app.integrations.uazapi import UazapiError, send_whatsapp_text
 
 try:
     from zoneinfo import ZoneInfo
@@ -123,7 +124,6 @@ def get_cfg() -> Config:
         weekly_report_weekday=int(os.getenv("WEEKLY_REPORT_WEEKDAY", "0")),
         weekly_report_hour=int(os.getenv("WEEKLY_REPORT_HOUR", "9")),
         weekly_report_minute=int(os.getenv("WEEKLY_REPORT_MINUTE", "0")),
-        # ✅ nova env opcional
         weekly_report_window_minutes=int(os.getenv("WEEKLY_REPORT_WINDOW_MINUTES", "180")),
     )
 
@@ -136,10 +136,11 @@ def maybe_send(cfg: Config, state: dict[str, Any], title: str, msg: str, *, bypa
             return
 
     try:
+        # ✅ UAZAPI: to é string (número ou grupo)
         send_whatsapp_text(to=cfg.alert_to, body=f"*{title}*\n{msg}")
         state["last_alert_sent_at"] = _iso(now_utc())
         save_state(state)
-    except BlibsendError as e:
+    except UazapiError as e:
         print(f"[watcher] FAILED to send WhatsApp: {e}")
 
 
@@ -264,7 +265,6 @@ def should_send_weekly_report(cfg: Config, state: dict[str, Any]) -> bool:
 
     dt_local = now_local(cfg.tz_name)
 
-    # só no dia configurado
     if dt_local.weekday() != cfg.weekly_report_weekday:
         return False
 
@@ -275,11 +275,9 @@ def should_send_weekly_report(cfg: Config, state: dict[str, Any]) -> bool:
     week_start = w.get("week_start_local")
     last_sent_for = w.get("last_weekly_report_sent_for_start")
 
-    # já mandou nessa semana
     if week_start and last_sent_for == week_start:
         return False
 
-    # horário alvo no dia de hoje (local)
     target = dt_local.replace(
         hour=cfg.weekly_report_hour,
         minute=cfg.weekly_report_minute,
@@ -287,11 +285,9 @@ def should_send_weekly_report(cfg: Config, state: dict[str, Any]) -> bool:
         microsecond=0,
     )
 
-    # se ainda não chegou no horário, não manda
     if dt_local < target:
         return False
 
-    # janela de tolerância
     window_sec = int(cfg.weekly_report_window_minutes) * 60
     if (dt_local - target).total_seconds() > window_sec:
         return False
@@ -361,7 +357,6 @@ def run_loop() -> None:
             ok_http = http_status is not None and (200 <= int(http_status) < 300)
             probe_ok = (probe_ms is not None) and ok_http
 
-            # indisponibilidade por falhas seguidas
             fail_streak = fail_streak + 1 if not probe_ok else 0
 
             prev_down = is_down
@@ -386,7 +381,6 @@ def run_loop() -> None:
                     bypass_rate_limit=cfg.recover_bypass_rate_limit,
                 )
 
-            # lentidão (somente quando probe OK)
             is_slow = probe_ok and (probe_ms is not None) and probe_ms >= cfg.slow_ms_threshold
             slow_streak = slow_streak + 1 if is_slow else 0
 
@@ -400,11 +394,9 @@ def run_loop() -> None:
                 )
                 slow_streak = 0
 
-            # resumo semanal (✅ com janela)
             if should_send_weekly_report(cfg, state):
                 send_weekly_report(cfg, state)
 
-            # persist
             state["slow_streak"] = slow_streak
             state["fail_streak"] = fail_streak
             state["is_down"] = is_down
