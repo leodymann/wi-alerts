@@ -6,12 +6,12 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, Header, HTTPException
 
-from app.blibsend_client import send_whatsapp_text, BlibsendError
+from app.integrations.uazapi import send_whatsapp_text, UazapiError
 
 app = FastAPI(title="WI Alerts")
 
 ALERT_SECRET = (os.getenv("ALERT_SECRET") or "").strip()
-ALERT_TO = (os.getenv("ALERT_TO") or "").strip()  # seu número, ex: 5583...
+ALERT_TO = (os.getenv("ALERT_TO") or "").strip()  # ex: 5583...
 API_URL = (os.getenv("API_URL") or "https://wi-api-production.up.railway.app").strip()
 
 
@@ -46,8 +46,9 @@ async def uptimerobot_webhook(
     )
 
     try:
-        send_whatsapp_text(to=[ALERT_TO], body=msg)
-    except BlibsendError as e:
+        # Uazapi espera string no "number"
+        send_whatsapp_text(to=ALERT_TO, body=msg)
+    except UazapiError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     return {"ok": True}
